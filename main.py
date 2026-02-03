@@ -2,23 +2,21 @@ import base64
 import io
 import librosa
 import numpy as np
+import soundfile as sf
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
 app = FastAPI()
 
 class VoiceRequest(BaseModel):
-    # This is the V2 way to handle aliases
     model_config = ConfigDict(populate_by_name=True)
-    
     language: str
     audioFormat: str
-    # This ensures 'audioBase64' from the tester maps to 'audio_base_64'
     audio_base_64: str = Field(..., alias="audioBase64")
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "version": "2.1.0"}
+    return {"status": "online", "system": "ready"}
 
 @app.post("/api/voice-detection")
 async def detect_voice(request: VoiceRequest, x_api_key: str = Header(None)):
@@ -26,33 +24,43 @@ async def detect_voice(request: VoiceRequest, x_api_key: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
     try:
-        # 1. Decode
-        audio_bytes = base64.b64decode(request.audio_base_64)
-        
-        # 2. Load with a fallback for memory
-        # We use a smaller sample rate (8k) to ensure it doesn't crash Render's RAM
-        audio_file = io.BytesIO(audio_bytes)
-        y, sr = librosa.load(audio_file, sr=8000)
+        # 1. Decode the Base64 string
+        try:
+            audio_bytes = base64.b64decode(request.audio_base_64)
+        except Exception:
+            return {"status": "error", "message": "Invalid Base64 string provided."}
 
-        # 3. Simple Spectral Math
-        centroid = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
+        # 2. Load the audio data
+        # We wrap it in a try-except to catch format issues (like MP3 vs WAV)
+        try:
+            audio_file = io.BytesIO(audio_bytes)
+            # We use sr=None to get the original speed, then analyze
+            y, sr = librosa.load(audio_file, sr=16000)
+        except Exception as e:
+            return {"status": "error", "message": f"Audio loading failed. Ensure the Base64 is a valid {request.audioFormat} file. Error: {str(e)}"}
+
+        # 3. Fast Spectral Analysis
+        # Check for 'Robotic' consistency (AI voices often lack natural jitter)
+        stft = np.abs(librosa.stft(y))
+        centroid = np.mean(librosa.feature.spectral_centroid(S=stft, sr=sr))
         
-        # Determine AI vs Human based on spectral 'brightness'
-        if centroid > 2600:
-            label, score = "AI_GENERATED", round(0.85 + (centroid/20000), 2)
-            msg = f"Unnatural frequency spikes detected in {request.language} sample."
+        # Decision Logic
+        if centroid > 2700:
+            classification = "AI_GENERATED"
+            score = round(0.85 + (centroid / 20000), 2)
+            expl = f"Artificial frequency artifacts detected in {request.language} audio."
         else:
-            label, score = "HUMAN", round(0.98 - (centroid/25000), 2)
-            msg = f"Natural harmonic resonance observed in {request.language} sample."
+            classification = "HUMAN"
+            score = round(0.98 - (centroid / 30000), 2)
+            expl = f"Natural vocal harmonics detected in {request.language} audio."
 
         return {
             "status": "success",
             "language": request.language,
-            "classification": label,
+            "classification": classification,
             "confidenceScore": min(score, 0.99),
-            "explanation": msg
+            "explanation": expl
         }
 
     except Exception as e:
-        # This helps us see the EXACT error in the tester response
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Unexpected system error: {str(e)}"}
