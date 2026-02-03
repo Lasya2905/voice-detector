@@ -13,10 +13,16 @@ try:
 except:
     classifier = None
 
+from pydantic import BaseModel, Field 
+
 class VoiceRequest(BaseModel):
     language: str
     audioFormat: str
-    audioBase64: str
+    audio_base64: str = Field(..., alias="audioBase64") 
+
+    
+    class Config:
+        populate_by_name = True
 
 @app.get("/")
 def health_check():
